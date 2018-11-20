@@ -1,26 +1,37 @@
 import nibabel as nib
 import pydicom
 
+import scipy
 import glob
 from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
-MRI_Types = {'T1': ['T1', 'SPGR', 'BRAVO', 'Bravo', 't1'], 
-                'T2': ['T2', 'FSE', 't2', 'K2']}
+from torchvision import transforms 
+
+from medicaltorch import datasets as mt_datasets
+from medicaltorch import transforms as mt_transforms
+from medicaltorch import losses as mt_losses
+from medicaltorch import metrics as mt_metrics
+from medicaltorch import filters as mt_filters
+
+from transforms3d import *
 
 class MRIDataset(Dataset):
     
-    def __init__(self, tcia_folder=None, brats_folder=None, lgg_folder=None, hgg_folder=None, type_str='T1', stage='lgg'):
+    def __init__(self, tcia_folder=None, brats_folder=None, lgg_folder=None, hgg_folder=None, 
+                    type_str='T1', stage='lgg', flag_3d=False, mode='train', channel_size_3d=32, mri_slice_dim=128):
         
         assert stage in ['lgg', 'hgg']
         assert type_str in ['T1', 'T2']
 
         Dataset.__init__(self)
         
+        self.flag_3d = flag_3d
+
         self.tcia_folder = tcia_folder
         self.brats_folder = brats_folder
         self.lgg_folder = lgg_folder
@@ -47,24 +58,117 @@ class MRIDataset(Dataset):
         
         self.type = type_str
         self.stage = stage
+        self.channel_size_3d = channel_size_3d
         
         self.seg_mapping = {'tcia': 'Segmentation', 'brats':'seg', 
-                        'lgg':'GlistrBoost_ManuallyCorrected', 
-                        'hgg':'GlistrBoost_ManuallyCorrected'}
+                        'lgg':'GlistrBoost*', 
+                        'hgg':'GlistrBoost*'}
         
         self.type_mapping = {'tcia': self.type+'*', 'brats': self.type.lower(), 'lgg': self.type.lower(), 'hgg': self.type.lower()}
 
+        self.segmentation_pairs = []
+        for idx in range(len(self.folders)):
+            
+            vox_fname = glob.glob(self.folders[idx] + '/*'+self.type_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
+            seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
+
+            self.segmentation_pairs.append([vox_fname, seg_fname])
+        
+        spl = [.8,.1,.1]
+        
+        train_ptr = int(spl[0]*len(self.segmentation_pairs)) 
+        val_ptr = train_ptr + int(spl[1]*len(self.segmentation_pairs))
+ 
+        if not flag_3d:
+            train_transforms = transforms.Compose([
+                                MTResize((mri_slice_dim,mri_slice_dim)),
+                                mt_transforms.ToTensor(),
+                                MTNormalize()])
+
+            val_transforms = transforms.Compose([
+                                transforms.Resize((mri_slice_dim,mri_slice_dim)),
+                                mt_transforms.ToTensor(),
+                                MTNormalize()])       
+            train_unnormalized = train_transforms
+
+        else:
+            train_transforms = transforms.Compose([
+                                    ToPILImage3D(),
+                                    transforms.RandomChoice([
+                                        RandomHorizontalFlip3D(),
+                                        RandomVerticalFlip3D(),
+                                        RandomRotation3D(30)]),
+                                    ToTensor3D(),
+                                    IndividualNormalize3D('min_max')])
+
+            train_unnormalized = transforms.Compose([
+                                    ToPILImage3D(),
+                                    transforms.RandomChoice([
+                                        RandomHorizontalFlip3D(),
+                                        RandomVerticalFlip3D(),
+                                        RandomRotation3D(30)]),
+                                    ToTensor3D(),])
+
+            '''
+                                    
+            '''
+            val_transforms = transforms.Compose([ToTensor3D(), IndividualNormalize3D()])
+
+        if mode == 'train':
+            self.segmentation_pairs = self.segmentation_pairs[:train_ptr]
+            self.transforms = train_transforms
+            self.seg_transforms = train_unnormalized
+        elif mode == 'val':
+            self.segmentation_pairs = self.segmentation_pairs[train_ptr:val_ptr]
+            self.transforms = val_transforms
+            self.seg_transforms = train_unnormalized
+        else:
+            self.segmentation_pairs = self.segmentation_pairs[val_ptr:]
+            self.transforms = val_transforms
+            self.seg_transforms = train_unnormalized
+        
+        if not flag_3d:
+            self.twod_slices_dataset = mt_datasets.MRI2DSegmentationDataset(self.segmentation_pairs, transform=self.transforms)
+        
     def __len__(self):
-        return len(self.folders)
+        if not self.flag_3d:
+            return len(self.twod_slices_dataset)
+        else:
+            return len(self.segmentation_pairs)
 
     def __getitem__(self, idx):
         
-        vox_fname = glob.glob(self.folders[idx] + '/*'+self.type_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
-        seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
+        if not self.flag_3d:
+            mt_dict = self.twod_slices_dataset.__getitem__(idx)
+            return mt_dict['input'], mt_dict['gt']
 
-        fobj = nib.load(vox_fname)
-        sobj = nib.load(seg_fname)
-        return fobj.get_fdata(), sobj.get_fdata()         
+        else:
+            vox_fname, seg_fname = self.segmentation_pairs[idx]
+            fobj = nib.load(vox_fname)
+            sobj = nib.load(seg_fname)
+            inp, out = torch.tensor(fobj.get_fdata()), torch.tensor(sobj.get_fdata())     
+
+            inp = inp.permute(2, 0, 1)
+            out = out.permute(2, 0, 1)
+            
+            if inp.size(0)<=self.channel_size_3d:
+                batch_size = (self.channel_size_3d,) + inp.size()[1:]
+                temp1, temp2 = torch.zeros(batch_size), torch.zeros(batch_size)
+                temp1[:inp.size(0),:,:] = inp
+                temp2[:out.size(0),:,:] = out
+
+                inp, out = temp1, temp2
+                
+            else:
+                r = np.random.randint(0, inp.size(0)-self.channel_size_3d)
+                inp, out = inp[r:r+self.channel_size_3d,:,:], out[r:r+self.channel_size_3d,:,:]
+            
+            if self.transforms:
+                inp, out = self.transforms(inp), self.seg_transforms(out)
+            
+            out[out>0] = 1
+
+            return inp, out
 
     def show_slices(self, slices, save=None):
     
@@ -136,31 +240,58 @@ if __name__=='__main__':
     params = {'tcia_folder':'data/NiFTiSegmentationsEdited', 'brats_folder':'data/BraTs', 
                 'hgg_folder':'data/Pre-operative_TCGA_GBM_NIfTI_and_Segmentations',
                 'lgg_folder':'data/Pre-operative_TCGA_LGG_NIfTI_and_Segmentations'}
+   
+    flag_3d = False
+    mri_slice_dim = 128
+
+    t1_lgg = MRIDataset(**params, type_str='T1', stage='lgg', flag_3d=flag_3d, mri_slice_dim=mri_slice_dim)
+    t2_lgg = MRIDataset(**params, type_str='T2', stage='lgg', flag_3d=flag_3d, mri_slice_dim=mri_slice_dim)
+    t1_hgg = MRIDataset(**params, type_str='T1', stage='hgg', flag_3d=flag_3d, mri_slice_dim=mri_slice_dim)
+    t2_hgg = MRIDataset(**params, type_str='T2', stage='hgg', flag_3d=flag_3d, mri_slice_dim=mri_slice_dim)
     
-    t1_lgg = MRIDataset(**params, type_str='T1', stage='lgg')
-    t2_lgg = MRIDataset(**params, type_str='T2', stage='lgg')
-    t1_hgg = MRIDataset(**params, type_str='T1', stage='hgg')
-    t2_hgg = MRIDataset(**params, type_str='T2', stage='hgg')
-    
-    prep = lambda x: 'Number of patients in %s study for %s: %d\n'%(x.type, x.stage, len(x))
+    prep = lambda x: 'Number of %s in %s study for %s: %d\n'%('patients' if flag_3d else 'slices', x.type, x.stage, len(x))
     print (prep(t1_lgg), prep(t2_lgg), prep(t1_hgg), prep(t2_hgg))
     
-    plot_histogram(t1_lgg, t1_hgg, t2_lgg, t2_hgg)
+    #plot_histogram(t1_lgg, t1_hgg, t2_lgg, t2_hgg)
+
+    load_t1_lgg = DataLoader(t1_lgg, batch_size=32, shuffle=True, 
+                                num_workers=4, collate_fn=mt_datasets.mt_collate)
+    '''
+    for i, (i1, i2) in enumerate(load_t1_lgg):
+        print (i1.shape, i2.shape, [torch.min(i1), torch.max(i1)], [torch.min(i2), torch.max(i2)])
+    '''
+
+    flag_3d = True
+    channel_size_3d = 32
+    t1_lgg_3d = MRIDataset(**params, type_str='T1', stage='lgg', flag_3d=flag_3d, 
+                                channel_size_3d=channel_size_3d, mri_slice_dim=mri_slice_dim)
+    t2_lgg_3d = MRIDataset(**params, type_str='T2', stage='lgg', flag_3d=flag_3d, 
+                                channel_size_3d=channel_size_3d, mri_slice_dim=mri_slice_dim)
+    t1_hgg_3d = MRIDataset(**params, type_str='T1', stage='hgg', flag_3d=flag_3d, 
+                                channel_size_3d=channel_size_3d, mri_slice_dim=mri_slice_dim)
+    t2_hgg_3d = MRIDataset(**params, type_str='T2', stage='hgg', flag_3d=flag_3d, 
+                                channel_size_3d=channel_size_3d, mri_slice_dim=mri_slice_dim)
+    
+    print (prep(t1_lgg_3d), prep(t2_lgg_3d), prep(t1_hgg_3d), prep(t2_hgg_3d))
+    
+    load_t1_lgg_3d = DataLoader(t1_lgg_3d, batch_size=1, shuffle=False, num_workers=4, collate_fn=mt_datasets.mt_collate)
+
+    true_size = [1, channel_size_3d, mri_slice_dim, mri_slice_dim] 
+
+    for i, (i1, i2) in enumerate(load_t1_lgg_3d):
+        
+        print (i1.shape==true_size, i1.shape, true_size, i2.shape==true_size, [torch.min(i1), torch.max(i1)], [torch.min(i2), torch.max(i2)]) 
 
     '''
-    for i, (i1, i2) in enumerate(t1_lgg):
-        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.amin(i1), np.amax(i1)], [np.amin(i2), np.amax(i2)])
     for i, (i1, i2) in enumerate(t2_lgg):
-        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.amin(i1), np.amax(i1)], [np.amin(i2), np.amax(i2)])
+        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.atorch.min(i1), np.atorch.max(i1)], [np.atorch.min(i2), np.atorch.max(i2)])
     for i, (i1, i2) in enumerate(t1_hgg):
-        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.amin(i1), np.amax(i1)], [np.amin(i2), np.amax(i2)])
+        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.atorch.min(i1), np.atorch.max(i1)], [np.atorch.min(i2), np.atorch.max(i2)])
     for i, (i1, i2) in enumerate(t2_hgg):
-        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.amin(i1), np.amax(i1)], [np.amin(i2), np.amax(i2)])
-    '''
-
-    '''
+        print (t1_lgg.dataset_types[i], i1.shape, i2.shape, [np.atorch.min(i1), np.atorch.max(i1)], [np.atorch.min(i2), np.atorch.max(i2)])
+    
     # Save sample dataset image slices to disk
-    no_of_patients = 4
+    no_of_patients = 10
     
     TOTAL = []
 
