@@ -94,24 +94,23 @@ class MRIDataset(Dataset):
         else:
             train_transforms = transforms.Compose([
                                     ToPILImage3D(),
+                                    Resize3D((mri_slice_dim, mri_slice_dim)),
                                     transforms.RandomChoice([
                                         RandomHorizontalFlip3D(),
                                         RandomVerticalFlip3D(),
                                         RandomRotation3D(30)]),
                                     ToTensor3D(),
-                                    IndividualNormalize3D('min_max')])
+                                    Normalize3D('min_max')])
 
             train_unnormalized = transforms.Compose([
                                     ToPILImage3D(),
+                                    Resize3D((mri_slice_dim, mri_slice_dim)),
                                     transforms.RandomChoice([
                                         RandomHorizontalFlip3D(),
                                         RandomVerticalFlip3D(),
                                         RandomRotation3D(30)]),
                                     ToTensor3D(),])
-
-            '''
-                                    
-            '''
+            
             val_transforms = transforms.Compose([ToTensor3D(), IndividualNormalize3D()])
 
         if mode == 'train':
@@ -147,7 +146,7 @@ class MRIDataset(Dataset):
             fobj = nib.load(vox_fname)
             sobj = nib.load(seg_fname)
             inp, out = torch.tensor(fobj.get_fdata()), torch.tensor(sobj.get_fdata())     
-
+            
             inp = inp.permute(2, 0, 1)
             out = out.permute(2, 0, 1)
             
@@ -164,7 +163,7 @@ class MRIDataset(Dataset):
                 inp, out = inp[r:r+self.channel_size_3d,:,:], out[r:r+self.channel_size_3d,:,:]
             
             if self.transforms:
-                inp, out = self.transforms(inp), self.seg_transforms(out)
+                inp, out = self.transforms(inp), self.seg_transforms(out) 
             
             out[out>0] = 1
 
@@ -276,11 +275,9 @@ if __name__=='__main__':
     
     load_t1_lgg_3d = DataLoader(t1_lgg_3d, batch_size=1, shuffle=False, num_workers=4, collate_fn=mt_datasets.mt_collate)
 
-    true_size = [1, channel_size_3d, mri_slice_dim, mri_slice_dim] 
-
     for i, (i1, i2) in enumerate(load_t1_lgg_3d):
         
-        print (i1.shape==true_size, i1.shape, true_size, i2.shape==true_size, [torch.min(i1), torch.max(i1)], [torch.min(i2), torch.max(i2)]) 
+        print (i1.shape, i2.shape, [torch.min(i1), torch.max(i1)], [torch.min(i2), torch.max(i2)]) 
 
     '''
     for i, (i1, i2) in enumerate(t2_lgg):

@@ -16,6 +16,8 @@ import warnings
 from torchvision.transforms import functional as F
 from torchvision import transforms
 
+from collections import Iterable
+
 class MTResize(object):
     
     def __init__(self, new_shape, interpolation=Image.BILINEAR, labeled=True):
@@ -116,7 +118,28 @@ class IndividualNormalize3D(object):
             for i, b in enumerate(blk):
                 nmin, nmax = torch.min(b), torch.max(b)
                 blk[i] = (b - nmin) / (nmax-nmin+1e-8)
+        blk = blk.squeeze(2)
+        return blk
 
+    def __repr__(self):
+        return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
+
+class Normalize3D(object):
+    
+    def __init__(self, proc='min_max'):
+    # proc: z_score and min_max
+        
+        self.proc = proc
+
+    def __call__(self, blk):
+        
+        if self.proc == 'z_score':
+            mean, std = torch.mean(blk), torch.std(blk)
+            blk = (blk - mean)/(std+1e-8)
+        elif self.proc == 'min_max':
+            nmin, nmax = torch.min(blk), torch.max(blk)
+            blk = (blk - nmin) / (nmax-nmin+1e-8)
+        
         return blk
 
     def __repr__(self):
@@ -131,8 +154,8 @@ class Resize3D(object):
 
     def __call__(self, img):
         
-        for im in img:
-            F.resize(im, self.size, self.interpolation, inplace=True)
+        for i, im in enumerate(img):
+            img[i] = F.resize(im, self.size, self.interpolation)
         
         return img
 
