@@ -274,10 +274,29 @@ if __name__=='__main__':
     print (prep(t1_lgg_3d), prep(t2_lgg_3d), prep(t1_hgg_3d), prep(t2_hgg_3d))
     
     load_t1_lgg_3d = DataLoader(t1_lgg_3d, batch_size=1, shuffle=False, num_workers=4, collate_fn=mt_datasets.mt_collate)
+        
+    num_patients, num_imgs = 12, 4
 
     for i, (i1, i2) in enumerate(load_t1_lgg_3d):
         
         print (i1.shape, i2.shape, [torch.min(i1), torch.max(i1)], [torch.min(i2), torch.max(i2)]) 
+        
+        nimgs = int(num_patients/num_imgs)
+        fig, ax = plt.subplots(nrows=nimgs, ncols=2)
+        axptr = 0
+        for j in range(i1.size(1)):
+            if torch.max(i2[0][j])>0:
+                img1 = i1[0][j].permute(1,2,0).squeeze(2)
+                img2 = i2[0][j].permute(1,2,0).squeeze(2)
+                ax[axptr, 0].imshow(img1)
+                ax[axptr, 1].imshow(img2)
+                ax[axptr, 0].axis('off')
+                ax[axptr, 1].axis('off')
+                axptr += 1
+            if axptr == nimgs:
+                print ("Saved 1 batch image")
+                plt.savefig('normalized_'+str(i)+'.png')
+                break
 
     '''
     for i, (i1, i2) in enumerate(t2_lgg):
