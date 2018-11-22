@@ -26,7 +26,7 @@ class MRIDataset(Dataset):
                     type_str='T1', stage='lgg', flag_3d=False, mode='train', channel_size_3d=32, mri_slice_dim=128):
         
         assert stage in ['lgg', 'hgg']
-        assert type_str in ['T1', 'T2']
+        assert type_str in ['T1', 'T2', 'FLAIR']
 
         Dataset.__init__(self)
         
@@ -61,16 +61,28 @@ class MRIDataset(Dataset):
         self.channel_size_3d = channel_size_3d
         
         self.seg_mapping = {'tcia': 'Segmentation', 'brats':'seg', 
-                        'lgg':'GlistrBoost*', 
-                        'hgg':'GlistrBoost*'}
+                        'lgg':['GlistrBoost_ManuallyCorrected', 'GlistrBoost*'], 
+                        'hgg':['GlistrBoost_ManuallyCorrected', 'GlistrBoost*']}
         
         self.type_mapping = {'tcia': self.type+'*', 'brats': self.type.lower(), 'lgg': self.type.lower(), 'hgg': self.type.lower()}
 
         self.segmentation_pairs = []
         for idx in range(len(self.folders)):
             
-            vox_fname = glob.glob(self.folders[idx] + '/*'+self.type_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
-            seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
+            if isinstance(self.seg_mapping[self.dataset_types[idx]], list):
+                try:
+                    seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]][0]+'.nii.gz')[0]
+                except Exception:
+                    seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]][1]+'.nii.gz')[0]
+            else:
+                seg_fname = glob.glob(self.folders[idx] + '/*'+self.seg_mapping[self.dataset_types[idx]]+'.nii.gz')[0]
+               
+            vox_fname_list = glob.glob(self.folders[idx] + '/*'+self.type_mapping[self.dataset_types[idx]]+'.nii.gz')
+            
+            if vox_fname_list == []:
+                continue
+            else:
+                vox_fname = vox_fname_list[0]
 
             self.segmentation_pairs.append([vox_fname, seg_fname])
         
