@@ -98,8 +98,6 @@ def get_model(mode, flag_3d = True, channel_size_3d = 32, mri_slice_dim = 256, c
     if 5 in choice:
         dataset.segmentation_pairs.extend(flair_hgg.segmentation_pairs)
     
-    del t1_lgg, t1_hgg, t2_lgg, t2_hgg, flair_lgg, flair_hgg
-
     return dataset 
 
 
@@ -134,7 +132,7 @@ def get_optimizer(st, lr, momentum=0.9):
         return Adam(net.parameters(), lr = lr)
 
 optimizer = get_optimizer(args.optimizer, args.lr)
-scheduler = ReduceLROnPlateau(optimizer, 'min')
+scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2)
 
 def dice_loss(y, pred):
     smooth = 1.
@@ -149,10 +147,10 @@ def dice_loss(y, pred):
 def train(epoch, losstype='dice'):
     
     assert len(choice)>0
-    
+
     if args.iters is not None:
         primary_data_loader.dataset.segmentation_pairs = primary_data_loader.dataset.segmentation_pairs[:args.iters]
-
+    
     for idx, (inp, seg) in enumerate(primary_data_loader):
         
         optimizer.zero_grad()
@@ -176,7 +174,7 @@ def train(epoch, losstype='dice'):
             loss = bce_criterion(out, seg)
         
         avg_tool.update(loss)
-        log_str = add_to_log("Epoch %d, Batch %d/%d: Loss=%0.6f"%(epoch, idx+1, len(val_data_loader), avg_tool.get_average()))
+        log_str = add_to_log("Epoch %d, Batch %d/%d: Loss=%0.6f"%(epoch, idx+1, len(primary_data_loader), avg_tool.get_average()))
         loss.backward()
         optimizer.step()
 
@@ -188,6 +186,9 @@ def validate(losstype): #num_patients=20):
     val_loss_avg = CumulativeAverager()
     
     add_to_log("Performing validation test on %d samples"%len(val_data_loader))
+    
+    if args.iters is not None:
+        val_data_loader.dataset.segmentation_pairs = val_data_loader.dataset.segmentation_pairs[:args.iters]
 
     with torch.no_grad():
         
@@ -229,7 +230,7 @@ if not args.demo:
             checkpoint = torch.load(args.load_from)
             start = checkpoint['epoch']
             vloss = checkpoint['best_val_loss']
-            model.load_state_dict(checkpoint['state_dict'])
+            net.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.lr = checkpoint['learning_rate']
             log_str = add_to_log("=> loaded checkpoint '{}' (epoch {})"
@@ -260,7 +261,6 @@ if not args.demo:
 			'learning_rate': lr
         }, is_best) 
         
-        saver_fn(net, epoch)
 else:
     test()
 
