@@ -23,7 +23,8 @@ from transforms3d import *
 class MRIDataset(Dataset):
     
     def __init__(self, tcia_folder=None, brats_folder=None, lgg_folder=None, hgg_folder=None, 
-                    type_str='T1', stage='lgg', flag_3d=False, mode='train', channel_size_3d=32, mri_slice_dim=128):
+                        type_str='T1', stage='lgg', flag_3d=False, mode='train', 
+                        channel_size_3d=32, mri_slice_dim=128, aug=False):
         
         assert stage in ['lgg', 'hgg']
         assert type_str in ['T1', 'T2', 'FLAIR']
@@ -92,7 +93,19 @@ class MRIDataset(Dataset):
         val_ptr = train_ptr + int(spl[1]*len(self.segmentation_pairs))
  
         if not flag_3d:
-            train_transforms = transforms.Compose([
+            if aug:
+                train_transforms = transforms.Compose([
+                                MTResize((mri_slice_dim,mri_slice_dim)),
+                                transforms.RandomChoice([
+                                    mt_transforms.RandomRotation(30),
+                                    mt_transforms.ElasticTransform(alpha=2000, sigma=50),
+                                    mt_transforms.AdditiveGaussianNoise(mean=0.05, std=0.01),
+                                    mt_transforms.RandomAffine(degrees, translate=0.2, scale=(0.8,1.2), shear=0.2)]),
+                                mt_transforms.ToTensor(),
+                                MTNormalize()])
+
+            else:
+                train_transforms = transforms.Compose([
                                 MTResize((mri_slice_dim,mri_slice_dim)),
                                 mt_transforms.ToTensor(),
                                 MTNormalize()])
@@ -100,11 +113,14 @@ class MRIDataset(Dataset):
             val_transforms = transforms.Compose([
                                 transforms.Resize((mri_slice_dim,mri_slice_dim)),
                                 mt_transforms.ToTensor(),
-                                MTNormalize()])       
+                                MTNormalize()]) 
+
             train_unnormalized = train_transforms
 
         else:
-            train_transforms = transforms.Compose([
+            
+            if aug:
+                train_transforms = transforms.Compose([
                                     ToPILImage3D(),
                                     Resize3D((mri_slice_dim, mri_slice_dim)),
                                     transforms.RandomChoice([
@@ -114,7 +130,7 @@ class MRIDataset(Dataset):
                                     ToTensor3D(),
                                     Normalize3D('min_max')])
 
-            train_unnormalized = transforms.Compose([
+                train_unnormalized = transforms.Compose([
                                     ToPILImage3D(),
                                     Resize3D((mri_slice_dim, mri_slice_dim)),
                                     transforms.RandomChoice([
@@ -122,8 +138,23 @@ class MRIDataset(Dataset):
                                         RandomVerticalFlip3D(),
                                         RandomRotation3D(30)]),
                                     ToTensor3D(),])
-            
-            val_transforms = transforms.Compose([ToTensor3D(), IndividualNormalize3D()])
+            else:
+                train_transforms = transforms.Compose([
+                                    ToPILImage3D(),
+                                    Resize3D((mri_slice_dim, mri_slice_dim)),
+                                    ToTensor3D(),
+                                    Normalize3D('min_max')])
+
+                train_unnormalized = transforms.Compose([
+                                    ToPILImage3D(),
+                                    Resize3D((mri_slice_dim, mri_slice_dim)),
+                                    ToTensor3D(),])
+
+            val_transforms = transforms.Compose([
+                                    ToPILImage3D(),
+                                    Resize3D((mri_slice_dim, mri_slice_dim)),
+                                    ToTensor3D(),
+                                    IndividualNormalize3D(),])
 
         if mode == 'train':
             self.segmentation_pairs = self.segmentation_pairs[:train_ptr]
