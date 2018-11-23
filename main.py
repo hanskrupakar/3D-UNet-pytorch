@@ -1,5 +1,6 @@
 import sys
-sys.stdout = open("log.txt", 'w')
+
+#sys.stdout = open("log.txt", 'a')
 
 from model import UNet3D
 from data import MRIDataset
@@ -8,6 +9,7 @@ import math
 import random
 import shutil
 import numpy as np
+import os
 
 import torch
 
@@ -34,11 +36,33 @@ ap.add_argument('--lr', type=float, help='Initial Learning rate', default=0.001)
 ap.add_argument('--lr_decay', type=float, help='Learning Rate Decay', default=0.1)
 ap.add_argument('--optimizer', help='sgd, adam', default='adam')
 ap.add_argument('--epochs', help='Total number of epochs to train on data', default=200, type=int)
+ap.add_argument('--iters', help='Number of training batches per epoch', default=None, type=int)
 ap.add_argument('--aug', action='store_true', help='Flag to decide about input augmentations')
 ap.add_argument('--demo', action='store_true', help='Flag to indicate testing')
+ap.add_argument('--load_from', help='Path to checkpoint dict', default=None)
 args = ap.parse_args()
 
-def get_models(mode, flag_3d = True, channel_size_3d = 32, mri_slice_dim = 256):
+data_strs = ['lgg_t1', 'lgg_t2', 'lgg_flair', 'hgg_t1', 'hgg_t2', 'hgg_flair']
+
+log_str = ''
+if os.path.exists('log.txt'):
+    with open('log.txt', 'r') as f:
+        log_str = f.read()
+
+def add_to_log(st):
+    global log_str
+    print (st)
+    log_str = log_str+'\n'+st
+    with open('log.txt', 'w') as f:
+        f.write(log_str)
+    return log_str
+
+# Choices of datasets: can be any subset of the following types of MRI
+# [LGG: t1->0, t2->1, flair->2; HGG: t1->3, t2->4, flair->5]
+
+choice, losstype = [0,1,2,3,4,5], 'bce'
+
+def get_model(mode, flag_3d = True, channel_size_3d = 32, mri_slice_dim = 256, choice=[0,1,2,3,4,5]):
     
     assert math.log(mri_slice_dim, 2).is_integer() # Image dims must be powers of 2 
 
@@ -46,8 +70,6 @@ def get_models(mode, flag_3d = True, channel_size_3d = 32, mri_slice_dim = 256):
         aug = True
     else:
         aug = False
-
-    # Segregated dataset handlers for easier plug and play
 
     t1_lgg = MRIDataset(**folder_params, type_str='T1', stage='lgg', mode=mode, 
                 channel_size_3d=channel_size_3d, flag_3d=flag_3d, mri_slice_dim=mri_slice_dim, aug=aug)
@@ -63,33 +85,44 @@ def get_models(mode, flag_3d = True, channel_size_3d = 32, mri_slice_dim = 256):
     flair_hgg = MRIDataset(**folder_params, type_str='FLAIR', stage='hgg', mode=mode, 
                 channel_size_3d=channel_size_3d, flag_3d=flag_3d, mri_slice_dim=mri_slice_dim, aug=aug)
     
-    dataset_handlers = [t1_lgg, t2_lgg, flair_lgg, t1_hgg, t2_hgg, flair_hgg]
-    return dataset_handlers 
+    if 0 in choice:
+        dataset = t1_lgg
+    if 1 in choice:
+        dataset.segmentation_pairs.extend(t2_lgg.segmentation_pairs)
+    if 2 in choice:
+        dataset.segmentation_pairs.extend(flair_lgg.segmentation_pairs)
+    if 3 in choice:
+        dataset.segmentation_pairs.extend(t1_hgg.segmentation_pairs)
+    if 4 in choice:
+        dataset.segmentation_pairs.extend(t2_hgg.segmentation_pairs)
+    if 5 in choice:
+        dataset.segmentation_pairs.extend(flair_hgg.segmentation_pairs)
+    
+    del t1_lgg, t1_hgg, t2_lgg, t2_hgg, flair_lgg, flair_hgg
 
-get_dataset_loaders = lambda x, y: [DataLoader(item, batch_size=1, shuffle=y) for item in x]
+    return dataset 
+
 
 if not args.demo:
-    primary_dataset_handlers = get_models('train')
-    val_dataset_handlers =  get_models('val')
+    primary_dataset = get_model('train')
+    val_dataset =  get_model('val')
     
-    primary_dataset_loaders = get_dataset_loaders(primary_dataset_handlers, True)
-    val_dataset_loaders = get_dataset_loaders(val_dataset_handlers, False)
+    primary_data_loader = DataLoader(primary_dataset, batch_size=1, shuffle=True)
+    val_data_loader = DataLoader(val_dataset, batch_size=1, shuffle=True)
 else:
-    primary_dataset_handlers = get_models('test')
-    primary_dataset_loaders = get_dataset_loaders(test_dataset_handlers, False)
+    primary_dataset = get_model('test')
+    primary_data_loader = DataLoader(primary_dataset, shuffle=False, batch_size=1)
 
 # Book-keeping
 
-prep = lambda x: 'Number of %s in %s study for %s: %d\n'%('patients' if x.flag_3d else 'slices', x.type, x.stage, len(x))
-for dl in primary_dataset_handlers:
-    print (prep(dl), flush=True)
-
+types = ', '.join([data_strs[i] for i in choice])
+prep = lambda x: 'Number of %s in MRI study %s: %d\n'%('patients' if x.flag_3d else 'slices', types, len(x))
+log_str = add_to_log(prep(primary_dataset))
+log_str = add_to_log(prep(val_dataset))
 # Define 3D UNet and train, val, test scripts
 
 net = UNet3D()
 net.train()
-cpu_net = UNet3D()
-cpu_net.eval()
 
 net = DataParallel(net.cuda())
 bce_criterion = BCELoss()
@@ -113,16 +146,16 @@ def dice_loss(y, pred):
     return 1 - ((2. * intersection + smooth) /
               (yflat.sum() + predflat.sum() + smooth))
 
-def train(epoch, epoch_size=200, choice=[0,1,2,3,4,5], losstype='bce'):
+def train(epoch, losstype='dice'):
     
     assert len(choice)>0
+    
+    if args.iters is not None:
+        primary_data_loader.dataset.segmentation_pairs = primary_data_loader.dataset.segmentation_pairs[:args.iters]
 
-    for idx in range(epoch_size):
+    for idx, (inp, seg) in enumerate(primary_data_loader):
         
         optimizer.zero_grad()
-
-        dataset = random.choice(choice)
-        inp, seg = next(dataloader_iterators[dataset])
         
         inp, seg = torch.tensor(inp).cuda(), torch.tensor(seg, requires_grad=False).cuda()
         
@@ -143,22 +176,25 @@ def train(epoch, epoch_size=200, choice=[0,1,2,3,4,5], losstype='bce'):
             loss = bce_criterion(out, seg)
         
         avg_tool.update(loss)
-        print ("Epoch %d, Batch %d/%d: Loss=%0.6f"%(epoch, idx+1, epoch_size, avg_tool.get_average()), flush=True)
+        log_str = add_to_log("Epoch %d, Batch %d/%d: Loss=%0.6f"%(epoch, idx+1, len(val_data_loader), avg_tool.get_average()))
         loss.backward()
         optimizer.step()
 
         clip_grad_norm_(net.parameters(), 5.0)
 
-def validate(choice, losstype, num_patients=20):
-    val_loss_avg = CumulativeAverager()
-    data_strs = ['lgg_t1', 'lgg_t2', 'lgg_flair', 'hgg_t1', 'hgg_t2', 'hgg_flair']
+def validate(losstype): #num_patients=20):
     
+    net.eval()
+    val_loss_avg = CumulativeAverager()
+    
+    add_to_log("Performing validation test on %d samples"%len(val_data_loader))
+
     with torch.no_grad():
-        rand = random.choice(choice)
         
-        for inp, seg in val_dataset_loaders[rand]:
-                
-            out = cpu_net.forward(inp)
+        for inp, seg in val_data_loader:
+            
+            inp, seg = torch.tensor(inp).cuda(), torch.tensor(seg).cuda()
+            out = net.forward(inp)
             if losstype == 'bce':
                 loss = bce_criterion(out, seg)
             else:
@@ -166,7 +202,7 @@ def validate(choice, losstype, num_patients=20):
             val_loss_avg.update(loss)
     
     val_loss = val_loss_avg.get_average()
-    print ('Validation Loss on %s set=%0.6f'%(data_strs[rand], val_loss), flush=True)
+    log_str = add_to_log('Validation Loss=%0.6f'%(val_loss))
 
     return val_loss
 
@@ -181,21 +217,32 @@ def saver_fn(net_params, is_best, name='checkpt.pth.tar'):
 
 # Train or Test 
 
-# Choices of datasets: can be any subset of the following types of MRI
-# [LGG: t1->0, t2->1, flair->2; HGG: t1->3, t2->4, flair->5]
 
 if not args.demo:
     
     avg_tool = CumulativeAverager()
-    
-    choice, losstype = [0,1,2,3,4,5], 'bce'
 
-    dataloader_iterators = [iter(x) for x in primary_dataset_loaders]
-    
     vloss, is_best = torch.tensor(float(np.inf)), None
-    for epoch in range(args.epochs):
-        train(epoch, choice=choice, losstype=losstype)
-        val_loss = validate(choice=choice, losstype=losstype)
+    if args.load_from is not None:
+        if os.path.isfile(args.load_from):
+            log_str = add_to_log("=> loading checkpoint '{}'".format(args.load_from))
+            checkpoint = torch.load(args.load_from)
+            start = checkpoint['epoch']
+            vloss = checkpoint['best_val_loss']
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            args.lr = checkpoint['learning_rate']
+            log_str = add_to_log("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.load_from, checkpoint['epoch']))
+        else:
+            log_str = add_to_log("=> no checkpoint found at '{}'".format(args.load_from)) 
+    else:
+        start = 0
+    
+    for epoch in range(start, args.epochs):
+
+        train(epoch, losstype=losstype)
+        val_loss = validate(losstype=losstype).cpu()
         scheduler.step(val_loss)
 		
         if vloss > val_loss:

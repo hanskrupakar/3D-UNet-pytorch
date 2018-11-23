@@ -126,7 +126,8 @@ class MRIDataset(Dataset):
                                     transforms.RandomChoice([
                                         RandomHorizontalFlip3D(),
                                         RandomVerticalFlip3D(),
-                                        RandomRotation3D(30)]),
+                                        RandomRotation3D(30),
+                                        RandomShear3D(45, translate=.4, scale=(.7,1.3), shear=.2)]), 
                                     ToTensor3D(),
                                     Normalize3D('min_max')])
 
